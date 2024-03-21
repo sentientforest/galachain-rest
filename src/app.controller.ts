@@ -1,25 +1,24 @@
-import { Controller, Get, Param, Post } from '@nestjs/common';
+import { Body, Controller, Get, Param, Post } from '@nestjs/common';
 import { AppService } from './app.service';
-import { Variety } from './types';
 import { ethers } from 'ethers';
 import * as fs from 'fs';
 import * as path from 'path';
+
+export interface ISaveAiHuman {
+  userIdentity: string;
+  uuid: string;
+}
 
 @Controller()
 export class AppController {
   constructor(private readonly appService: AppService) { }
 
-  @Get()
-  getHello(): string {
-    return this.appService.getHello();
-  }
-
-  @Get('plant-tree/:index/:variety')
-  async plantTree(
-    @Param('index') index: number,
-    @Param('variety') variety: Variety,
+  @Post('aihuman')
+  async saveAiHuman(
+    @Body() dto: ISaveAiHuman,
   ) {
-    return this.appService.plantTree('todo', index, variety);
+
+    return this.appService.saveAiHuman(dto);
   }
 
   @Post('create-eth')
@@ -29,26 +28,20 @@ export class AppController {
 
   @Post('register-eth/:public')
   async registerUser(@Param('public') publicKey: string) {
-    return this.appService.registerUser(this.getAdminUser(), publicKey);
-  }
-
-  @Post('test')
-  async registerUser2(@Param('public') publicKey: string) {
-    const randomWallet = ethers.Wallet.createRandom();
-    const foo = await this.appService.registerUser(
-      this.getAdminUser(),
-      randomWallet.publicKey,
-    );
-    console.log(foo);
-    const test = await this.appService.plantTree(
-      randomWallet.privateKey,
-      5,
-      Variety.GOLDEN_DELICIOUS,
-    );
-    return test;
+    const [pk, sk] = this.getAdminUser();
+    return this.appService.registerUser(sk, pk);
   }
 
   getAdminUser() {
+    const publicKey =
+      process.env.TEST_ADMIN_PUBLIC_KEY ??
+      fs
+        .readFileSync(
+          path.resolve('dev-admin-key/dev-admin.pub.hex.txt'),
+          'utf-8',
+        )
+        .toString();
+
     const privateKey =
       process.env.TEST_ADMIN_PRIVATE_KEY ??
       fs
@@ -58,6 +51,6 @@ export class AppController {
         )
         .toString();
 
-    return privateKey;
+    return [publicKey, privateKey];
   }
 }

@@ -3,55 +3,58 @@ import {
   GalaChainResponse,
   GetMyProfileDto,
   RegisterEthUserDto,
-  StringEnumProperty,
   UserProfile,
   createValidDTO,
 } from '@gala-chain/api';
 import { Injectable } from '@nestjs/common';
 import axios from 'axios';
 import { execSync } from 'child_process';
-import { ChainClient, gcclient } from '@gala-chain/client';
+import { ChainClient, RestApiClientConfig, gcclient, HFClientConfig } from '@gala-chain/client';
 import * as path from 'path';
-import { Variety } from './types';
 import { ethers } from 'ethers';
+import { SaveAiHumanDto } from './types';
+import { readFileSync } from 'fs';
+import { plainToInstance } from "class-transformer";
+import { ISaveAiHuman } from './app.controller';
 
 interface CustomAPI {
   GetProfile(privateKey: string): Promise<UserProfile>;
-  PlantTree(privateKey: string, index: number, variety: string): Promise<any>;
+  SaveAiHuman(privateKey: string, userIdentity: string, uuid: string): Promise<any>;
 }
 
-export class AppleTreeDto extends ChainCallDTO {
-  @StringEnumProperty(Variety)
-  public readonly variety: Variety;
-
-  public readonly index: number;
-
-  constructor(variety: Variety, index: number) {
-    super();
-    this.variety = variety;
-    this.index = index;
-  }
-}
 
 @Injectable()
 export class AppService {
   client: ChainClient & CustomAPI;
   registerClient: ChainClient & CustomAPI;
+  aiHumanClient: ChainClient & CustomAPI;
 
   constructor() {
-    const params = {
+    // todo: harcoded for POC / local dev 
+    const params: HFClientConfig = {
       orgMsp: 'CuratorOrg',
       userId: 'admin',
       userSecret: 'adminpw',
       connectionProfilePath: path.resolve(
-        'connection-profiles/cpp-curator.json',
+        'connection-profiles/sample-cpp-curator.json',
       ),
     };
+
+    // todo: hardcoded for POC
+    const api: RestApiClientConfig = {
+      orgMsp: 'CuratorOrg',
+      userId: 'admin',
+      userSecret: 'adminpw',
+      apiUrl: process.env.API_URL ?? "https://localhost:3000",
+      configPath: path.resolve(
+        'connection-profiles./sample-api-config.json',
+      ),
+    }
 
     const contract = {
       channelName: 'product-channel',
       chaincodeName: 'basic-product',
-      contractName: 'AppleContract',
+      contractName: 'AiHumanContract',
     };
 
     const publicKeyContract = {
@@ -60,18 +63,45 @@ export class AppService {
       contractName: 'PublicKeyContract',
     };
 
-    this.client = gcclient
+    const aiHumanContract = {
+      channelName: 'product-channel',
+      chaincodeName: 'basic-product',
+      contractName: 'AiHumanContract',
+    }
+
+    if (process.env.NODE_ENV === "localdev") {
+      // for a locally deployed galachain network
+      this.client = gcclient
       .forConnectionProfile(params)
       .forContract(contract)
       .extendAPI(this.customAPI);
 
-    this.registerClient = gcclient
-      .forConnectionProfile(params)
-      .forContract(publicKeyContract)
-      .extendAPI(this.customAPI);
-  }
-  getHello(): string {
-    return 'Hello World!';
+      this.registerClient = gcclient
+        .forConnectionProfile(params)
+        .forContract(publicKeyContract)
+        .extendAPI(this.customAPI);
+
+      this.aiHumanClient = gcclient
+        .forConnectionProfile(params)
+        .forContract(aiHumanContract)
+        .extendAPI(this.customAPI);
+    } else {
+      // for a cloud deployed galachain network
+      this.registerClient = gcclient
+        .forApiConfig(api)
+        .forContract(publicKeyContract)
+        .extendAPI(this.customAPI);
+
+      this.client = gcclient
+        .forConnectionProfile(params)
+        .forContract(contract)
+        .extendAPI(this.customAPI);
+
+      this.aiHumanClient = gcclient
+        .forConnectionProfile(params)
+        .forContract(aiHumanContract)
+        .extendAPI(this.customAPI);
+    }
   }
 
   generateEthereumWallet() {
@@ -85,8 +115,9 @@ export class AppService {
     };
   }
 
-  public async plantTree(privateKey: string, index: number, variety: Variety) {
-    return await this.client.PlantTree(privateKey, index, variety);
+  public async saveAiHuman(params: ISaveAiHuman) {
+    const dto = new SaveAiHumanDto(params.userIdentity, params.uuid);
+    return await this.client.submitTransaction("SaveAiHuman", dto);
   }
 
   async registerUser(privateKey: string, publicKey: string) {
@@ -119,9 +150,9 @@ export class AppService {
           return response.Data as UserProfile;
         }
       },
-      async PlantTree(privateKey: string, index: number, variety: Variety) {
-        const dto = new AppleTreeDto(variety, index).signed(privateKey);
-        const response = await client.submitTransaction('PlantTree', dto);
+      async SaveAiHuman(privateKey: string, userIdentity: string, uuid: string) {
+        const dto = new SaveAiHumanDto(userIdentity, uuid).signed(privateKey);
+        const response = await client.submitTransaction('SaveAiHuman', dto);
         if (GalaChainResponse.isError(response)) {
           return `Cannot get profile: ${response.Message} (${response.ErrorKey})`;
         } else {
@@ -141,14 +172,16 @@ export class AppService {
     }
   }
 
-  private async dtoSign(filePath: string, payload: string): Promise<string> {
-    const escapedPayload = payload.replace(/"/g, `"\"`);
-    const command = `galachain dto-sign ${filePath} "${escapedPayload}"`;
-    return await this.execCommand(command);
+  private async dtoSign(dto: ChainCallDTO): Promise<ChainCallDTO> {
+    const sk = process.env.SERVER_ADMIN_SIGNING_KEY ?? readFileSync("dev-admin-key/dev-admin.priv.hex.txt").toString();
+
+    const signedDto = dto.signed(sk);
+
+    return signedDto;
   }
 
   async enrollUser(): Promise<string> {
-    const response = await axios.post('http://localhost:8801/user/enroll', {
+    const response = await axios.post('https://localhost:8801/user/enroll', {
       id: 'admin',
       secret: 'adminpw',
     });
@@ -158,8 +191,7 @@ export class AppService {
 
   async getMyProfile(token: string): Promise<any> {
     const dto = await this.dtoSign(
-      'dev-admin-key/dev-admin.priv.hex.txt',
-      '{}',
+      plainToInstance(ChainCallDTO, {})
     );
     console.log('get_my_profile_dto:', dto);
 
@@ -169,7 +201,7 @@ export class AppService {
     };
 
     const response = await axios.post(
-      'http://localhost:8801/invoke/product-channel/basic-product',
+      'https://localhost:8801/invoke/product-channel/basic-product',
       payload,
       {
         headers: {
@@ -181,5 +213,5 @@ export class AppService {
     console.log('Profile response:', response.data);
     return response.data;
   }
-
 }
+
